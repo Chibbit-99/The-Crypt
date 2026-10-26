@@ -11,124 +11,230 @@
     main { width:min(900px,100%); margin:0 auto; padding:48px 22px 64px; }
     .eyebrow { color:var(--accent); font-size:12px; font-weight:750; letter-spacing:.16em; text-transform:uppercase; }
     h1 { margin:9px 0 8px; font-size:clamp(30px,6vw,44px); letter-spacing:-.045em; line-height:1.08; }
-    .intro { color:var(--muted); max-width:650px; margin:0; }
+    .intro { color:var(--muted); max-width:660px; margin:0; }
     .panel { margin-top:28px; padding:24px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
     h2 { font-size:17px; margin:0 0 8px; }
     p { margin:8px 0; }
     .muted { color:var(--muted); }
-    .actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:20px; }
+    label { display:block; margin:22px 0 8px; font-size:13px; font-weight:700; }
+    select { display:block; width:100%; min-height:48px; padding:11px 13px; border:1px solid var(--line); border-radius:10px; background:var(--panel2); color:var(--text); font:inherit; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:18px; }
     button,.button { display:inline-flex; align-items:center; justify-content:center; gap:9px; border:1px solid var(--line); border-radius:10px; padding:11px 16px; background:var(--panel2); color:var(--text); font:inherit; font-weight:650; text-decoration:none; cursor:pointer; }
     button.primary { background:var(--accent); border-color:var(--accent); color:#10211c; }
-    button:disabled { opacity:.55; cursor:wait; }
-    .status { display:flex; align-items:center; gap:10px; color:var(--muted); margin-top:16px; min-height:24px; overflow-wrap:anywhere; }
-    .dot { width:8px; height:8px; flex:0 0 auto; border-radius:50%; background:#82908d; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .status { display:flex; align-items:flex-start; gap:10px; color:var(--muted); margin-top:16px; min-height:24px; overflow-wrap:anywhere; }
+    .dot { width:8px; height:8px; margin-top:7px; flex:0 0 auto; border-radius:50%; background:#82908d; }
     .status.busy .dot { background:var(--accent); box-shadow:0 0 0 4px #70d7bd20; }
     .status.error { color:var(--danger); }
     .status.error .dot { background:var(--danger); }
-    .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(135px,1fr)); gap:10px; margin-top:20px; }
+    .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-top:20px; }
     .stat { padding:15px; border-radius:12px; background:var(--panel2); border:1px solid var(--line); }
-    .stat strong { display:block; font-size:25px; letter-spacing:-.03em; }
+    .stat strong { display:block; font-size:24px; letter-spacing:-.03em; }
     .stat span { color:var(--muted); font-size:12px; }
     #result { display:none; }
     #warnings { margin-top:18px; padding:14px; border:1px solid #6e5140; border-radius:10px; color:#ffd0ae; white-space:pre-wrap; overflow-wrap:anywhere; }
     .foot { margin-top:22px; color:var(--muted); font-size:12px; }
+    .pill { display:inline-block; margin-top:8px; padding:4px 9px; border-radius:20px; border:1px solid var(--line); color:var(--muted); font-size:12px; }
     @media (max-width:520px) { main { padding:30px 15px 45px; } .panel { padding:18px; } }
   </style>
 </head>
 <body>
   <main>
     <div class="eyebrow">The Crypt / Utilities</div>
-    <h1>Classroom discovery</h1>
-    <p class="intro">Find resources attached to your Google Classroom courses and create a searchable JSON manifest in your Google Drive.</p>
+    <h1>Classroom exporter</h1>
+    <p class="intro">Choose a class, bundle its exportable attachments into a ZIP, and download it straight to this device. No GitHub upload.</p>
 
     <section class="panel">
-      <h2>Discover resources</h2>
-      <p class="muted">Scans courses, assignments, class materials and announcements you’re allowed to access. Drive files are listed; external links, Forms and YouTube videos are recorded as references.</p>
-      <p class="muted"><strong>Note:</strong> This step only creates a manifest. It does not download files or upload anything to GitHub.</p>
+      <h2>1. Choose a class</h2>
+      <p class="muted">Your classes load automatically when this page opens.</p>
+      <label for="course">Google Classroom class</label>
+      <select id="course" disabled>
+        <option value="">Loading your classes…</option>
+      </select>
+      <div id="courseMeta" class="pill" style="display:none"></div>
+
       <div class="actions">
-        <button id="run" class="primary" onclick="runDiscovery()">Run discovery <span aria-hidden="true">↗</span></button>
-        <a id="manifest" class="button" href="#" target="_blank" rel="noopener" style="display:none">Open manifest</a>
+        <button id="reload" onclick="loadCourses()">Refresh classes</button>
+        <button id="export" class="primary" onclick="startExport()" disabled>Export selected class ↓</button>
       </div>
-      <div id="status" class="status" role="status" aria-live="polite"><span class="dot"></span><span id="statusText">Ready when you are.</span></div>
+      <div id="status" class="status" role="status" aria-live="polite"><span class="dot"></span><span id="statusText">Connecting to Google Classroom…</span></div>
+
       <div id="result">
         <div class="stats" id="stats"></div>
         <div id="warnings" style="display:none"></div>
+        <div class="actions">
+          <a id="downloadAgain" class="button" href="#" download style="display:none">Download ZIP again</a>
+        </div>
       </div>
     </section>
-    <p class="foot">Your school may restrict Classroom API access. The first run may ask you to authorise access. Only deploy this app for your own account unless you intentionally want other users to run discovery.</p>
+
+    <section class="panel">
+      <h2>What gets exported?</h2>
+      <p class="muted">Regular downloadable Drive files are copied as-is. Google Docs, Sheets and Slides are converted to DOCX, XLSX and PPTX; Drawings become PDFs. Files are deduplicated by Drive ID.</p>
+      <p class="muted">External websites, YouTube links, Forms, unsupported Google file types, inaccessible files and files excluded by the size safety limit are listed in <code>EXPORT-REPORT.txt</code> inside the ZIP. The ZIP is kept to a conservative size so it can be transferred through the web app.</p>
+    </section>
+    <p class="foot">This app only exports content your account can access. Keep the ZIP private if it contains school materials. Your school administrator may restrict Classroom or Drive access.</p>
   </main>
   <script>
-    const runButton = document.getElementById('run');
+    const courseSelect = document.getElementById('course');
+    const exportButton = document.getElementById('export');
+    const reloadButton = document.getElementById('reload');
     const statusBox = document.getElementById('status');
     const statusText = document.getElementById('statusText');
     const resultBox = document.getElementById('result');
-    const manifestLink = document.getElementById('manifest');
+    const courseMeta = document.getElementById('courseMeta');
+    const downloadAgain = document.getElementById('downloadAgain');
+    let courses = [];
+    let lastDownloadUrl = null;
 
     function setStatus(message, state) {
       statusText.textContent = message;
       statusBox.className = 'status' + (state ? ' ' + state : '');
     }
 
-    function runDiscovery() {
-      runButton.disabled = true;
-      manifestLink.style.display = 'none';
-      resultBox.style.display = 'none';
-      setStatus('Connecting to Google Classroom… this can take a little while.', 'busy');
+    function updateSelection() {
+      const course = courses.find(function(item) { return item.id === courseSelect.value; });
+      exportButton.disabled = !course || exportButton.dataset.busy === 'true';
+      if (course) {
+        courseMeta.textContent = course.section ? course.section : (course.courseState || 'Class selected');
+        courseMeta.style.display = 'inline-block';
+      } else {
+        courseMeta.style.display = 'none';
+      }
+    }
+
+    courseSelect.addEventListener('change', updateSelection);
+
+    function loadCourses() {
+      courseSelect.disabled = true;
+      exportButton.disabled = true;
+      reloadButton.disabled = true;
+      courseSelect.replaceChildren(new Option('Loading your classes…', ''));
+      setStatus('Loading classes from Google Classroom…', 'busy');
 
       google.script.run
         .withSuccessHandler(function(data) {
-          runButton.disabled = false;
-          if (!data || !data.success) {
-            setStatus('The script returned an unexpected response.', 'error');
+          courses = Array.isArray(data) ? data : [];
+          courseSelect.replaceChildren();
+          if (!courses.length) {
+            courseSelect.add(new Option('No classes were returned', ''));
+            setStatus('No classes found. Check that this account can access Google Classroom.', 'error');
+          } else {
+            courseSelect.add(new Option('Select a class…', ''));
+            courses.forEach(function(course) {
+              const label = course.name + (course.section ? ' — ' + course.section : '');
+              courseSelect.add(new Option(label, course.id));
+            });
+            setStatus(courses.length + ' class' + (courses.length === 1 ? '' : 'es') + ' loaded. Select one to continue.');
+          }
+          courseSelect.disabled = false;
+          reloadButton.disabled = false;
+          updateSelection();
+        })
+        .withFailureHandler(function(error) {
+          courses = [];
+          courseSelect.replaceChildren(new Option('Could not load classes', ''));
+          courseSelect.disabled = true;
+          reloadButton.disabled = false;
+          exportButton.disabled = true;
+          setStatus(error && error.message ? error.message : String(error || 'Could not load classes.'), 'error');
+        })
+        .getClassroomCourses();
+    }
+
+    function startExport() {
+      const courseId = courseSelect.value;
+      const selected = courses.find(function(item) { return item.id === courseId; });
+      if (!selected) {
+        setStatus('Select a class first.', 'error');
+        return;
+      }
+
+      exportButton.dataset.busy = 'true';
+      exportButton.disabled = true;
+      reloadButton.disabled = true;
+      resultBox.style.display = 'none';
+      setStatus('Scanning ' + selected.name + ', exporting files and building the ZIP… keep this page open.', 'busy');
+
+      google.script.run
+        .withSuccessHandler(function(data) {
+          exportButton.dataset.busy = 'false';
+          reloadButton.disabled = false;
+          updateSelection();
+          if (!data || !data.success || !data.base64) {
+            setStatus('The server did not return a ZIP file.', 'error');
             return;
           }
 
-          const stats = data.stats || {};
-          const entries = [
-            ['Courses', stats.courseCount],
-            ['Unique Drive files', stats.driveAttachmentCount],
-            ['External links', stats.externalLinkCount],
-            ['YouTube videos', stats.youtubeCount],
-            ['Google Forms', stats.formCount],
-            ['Warnings', stats.warningCount]
-          ];
-          document.getElementById('stats').replaceChildren(...entries.map(function(entry) {
-            const card = document.createElement('div');
-            card.className = 'stat';
-            const value = document.createElement('strong');
-            value.textContent = Number(entry[1] || 0).toLocaleString();
-            const label = document.createElement('span');
-            label.textContent = entry[0];
-            card.append(value, label);
-            return card;
-          }));
+          try {
+            const binary = atob(data.base64);
+            const chunks = [];
+            const chunkSize = 1024 * 1024;
+            for (let offset = 0; offset < binary.length; offset += chunkSize) {
+              const part = binary.slice(offset, offset + chunkSize);
+              const bytes = new Uint8Array(part.length);
+              for (let i = 0; i < part.length; i++) bytes[i] = part.charCodeAt(i);
+              chunks.push(bytes);
+            }
+            const blob = new Blob(chunks, { type: data.mimeType || 'application/zip' });
+            const url = URL.createObjectURL(blob);
+            if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
+            lastDownloadUrl = url;
+            downloadAgain.href = url;
+            downloadAgain.download = data.filename || 'classroom-resources.zip';
+            downloadAgain.style.display = 'inline-flex';
 
-          manifestLink.href = data.manifestUrl;
-          manifestLink.style.display = 'inline-flex';
-          resultBox.style.display = 'block';
+            // Trigger a browser download to the user's device.
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = data.filename || 'classroom-resources.zip';
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
 
-          const warnings = data.warnings || [];
-          const warningBox = document.getElementById('warnings');
-          if (warnings.length) {
-            warningBox.textContent = 'Some course sections could not be scanned:\n' +
-              warnings.map(function(w) {
-                return '• ' + (w.courseName || 'Course') + ' — ' + w.stage + ': ' + w.message;
-              }).join('\n');
-            warningBox.style.display = 'block';
-          } else {
-            warningBox.style.display = 'none';
-            warningBox.textContent = '';
+            document.getElementById('stats').replaceChildren(
+              makeStat('Exported', data.exportedCount),
+              makeStat('Skipped', data.skippedCount),
+              makeStat('References', data.referenceCount),
+              makeStat('ZIP size', formatBytes(data.zipBytes))
+            );
+            document.getElementById('warnings').style.display = data.warningCount ? 'block' : 'none';
+            document.getElementById('warnings').textContent = data.warningCount
+              ? data.warningCount + ' section scan warning(s). See EXPORT-REPORT.txt in the ZIP for details.'
+              : '';
+            resultBox.style.display = 'block';
+            setStatus('ZIP prepared for ' + selected.name + '. Your browser should download ' + (data.filename || 'the ZIP') + '.', '');
+          } catch (error) {
+            setStatus('The ZIP was returned, but the browser could not prepare the download: ' + error.message, 'error');
           }
-
-          setStatus('Discovery finished. The manifest has been saved to your Google Drive.', '');
         })
         .withFailureHandler(function(error) {
-          runButton.disabled = false;
-          const message = error && error.message ? error.message : String(error || 'Unknown error');
-          setStatus(message, 'error');
+          exportButton.dataset.busy = 'false';
+          reloadButton.disabled = false;
+          updateSelection();
+          setStatus(error && error.message ? error.message : String(error || 'Export failed.'), 'error');
         })
-        .discoverClassroomResources();
+        .exportClassResources(courseId);
     }
+
+    function makeStat(label, value) {
+      const card = document.createElement('div');
+      card.className = 'stat';
+      const strong = document.createElement('strong');
+      strong.textContent = value == null ? '0' : String(value);
+      const span = document.createElement('span');
+      span.textContent = label;
+      card.append(strong, span);
+      return card;
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes) return '0 B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    window.addEventListener('load', loadCourses);
   </script>
 </body>
 </html>
