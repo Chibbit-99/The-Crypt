@@ -1,44 +1,43 @@
-# Classroom discovery Apps Script
+# Classroom ZIP exporter (Apps Script)
 
-This folder contains the first-stage Google Classroom exporter for The Crypt.
+This folder contains The Crypt's Google Classroom class exporter.
 
 ## What it does
 
-- classroom-discovery.gs discovers resources visible to the signed-in account from coursework/assignments, class materials and announcements.
-- index.html is the web app dashboard. It calls the server-side Apps Script function using google.script.run, displays discovery counts and links to the manifest.
-- The script records Drive attachment IDs and links, and notes external links, YouTube videos and Forms as references. It writes a timestamped JSON manifest to Google Drive.
+- When the web app opens, it loads the classes available to the signed-in account.
+- You choose one class and click **Export selected class**.
+- The server scans that class's assignments/coursework, class materials and announcements.
+- Downloadable Drive attachments are bundled into a ZIP. The page converts the returned ZIP bytes into a browser download, saving it to the user's actual device.
+- Google Docs, Sheets and Slides are exported as DOCX, XLSX and PPTX; Google Drawings are exported as PDFs. Other downloadable Drive files are included as-is.
+- Drive IDs are deduplicated, and the ZIP includes EXPORT-REPORT.txt showing exported files, skipped files, reference-only links and scan warnings.
 
-**This is discovery only.** It does not download attachment contents, upload files to GitHub, read student submissions, or bypass Drive permissions.
+**No GitHub upload is performed.** External URLs, YouTube videos and Google Forms are references, not downloadable files in this workflow. Unsupported native Google file types, files the account cannot access, and files excluded by the size safety limit are noted in the report.
 
 ## Set up the Apps Script web app
 
 1. Open [Google Apps Script](https://script.google.com/) and create a standalone project.
-2. Add a script file named classroom-discovery.gs (or use the default Code.gs) and copy in the contents of the repository's classroom-discovery.gs.
+2. Add a script file named classroom-discovery.gs (or use the default Code.gs) and paste in the contents of this repository's classroom-discovery.gs.
 3. In the editor, click **Services +** and add **Google Classroom API**.
-4. Click **+** beside Files and choose **HTML**. Name the file exactly **index** (Apps Script will show it as index.html) and paste in the contents of this repository's index.html.
+4. Click **+** beside Files and choose **HTML**. Name the file exactly **index** (Apps Script displays it as index.html) and paste in the contents of this repository's index.html.
 5. Save the project.
 6. Select doGet and click **Deploy → New deployment**.
-7. Select the gear icon and choose **Web app**.
+7. Choose **Web app** from the deployment type menu.
 8. For a personal tool, set **Execute as** to **Me** and **Who has access** to **Only myself**. Do not make a school-resource exporter public.
-9. Click **Deploy**, complete any authorisation prompts, then open the web app URL. If prompted, authorise the app with the school account.
-10. Click **Run discovery** on the dashboard. When it finishes, click **Open manifest**.
+9. Click **Deploy**, complete authorisation prompts, then open the web app URL.
+10. The page should load your classes automatically. Choose a class and click **Export selected class**.
 
-When changing the code later, use **Deploy → Manage deployments → Edit** and select a new version, then redeploy for the existing web app URL to serve the update.
+When changing the code later, use **Deploy → Manage deployments → Edit**, select a new version, and redeploy for the existing web app URL to serve the update.
 
-## Important hosting distinction
+## Hosting and permissions
 
-The HTML dashboard is a Google Apps Script HTML Service page, not a standalone GitHub Pages app. The google.script.run bridge only exists when index.html is served by Apps Script. Hosting this HTML on GitHub Pages will not run the server-side .gs functions.
+The HTML dashboard is served by Apps Script HTML Service. The google.script.run bridge works only when Apps Script serves index.html; GitHub Pages alone cannot run the server-side .gs functions.
 
-No separately managed Google Cloud project should normally be necessary. If the school administrator has disabled Classroom API access or Apps Script, contact them rather than attempting to bypass the restriction.
+The script uses the Google Classroom advanced service, DriveApp to read attachments, and UrlFetchApp with the current Apps Script OAuth token to export Google-native documents. Apps Script may ask for Classroom, Drive and external-request permissions. No separately managed Cloud project should normally be necessary, but a Workspace administrator can restrict these APIs or Apps Script.
 
-## Output
+## Size and format limits
 
-The JSON manifest contains course metadata, unique Drive file IDs, source-post metadata, external-link references, counts and any API errors. Re-run discovery to generate a fresh manifest.
-
-## Known limitations
-
-- Only resources the account running the script is allowed to discover are returned.
-- Drive files can be listed by Classroom but still be unavailable for download.
-- Linked web pages are recorded as URLs; their contents are not archived.
-- Google Docs, Sheets and Slides are not exported in this stage.
-- The manifest may contain school/course names and Drive file IDs. Keep it private and do not share it publicly without checking school rules.
+- The ZIP transfer is deliberately limited to a conservative size (roughly 32 MB of source file data, with a hard check on the final ZIP response). Large classes may need to be split into smaller exports.
+- Apps Script runtime, Google Drive export limits, account permissions and Workspace administrator policies still apply.
+- Only files visible to the account running the web app can be exported.
+- Google Sites, Forms, videos and external web pages are not archived as complete resources; they are recorded in EXPORT-REPORT.txt when encountered.
+- Keep the downloaded ZIP private if it contains school materials.
