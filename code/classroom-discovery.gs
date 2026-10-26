@@ -1,121 +1,237 @@
 /**
- * The Crypt — Google Classroom resource discovery
+ * The Crypt — Google Classroom resource exporter
  *
- * Discovers Drive attachments visible to the signed-in student in:
- *   - coursework / assignments
- *   - class materials
- *   - announcements
- *
- * The web app UI is served by doGet() from index.html.
- * Discovery creates a JSON manifest in Google Drive; it does not yet
- * download resources or upload anything to GitHub.
+ * Serves index.html as an Apps Script web app, lists the user's classes,
+ * and exports the selected class's downloadable Drive attachments to a ZIP.
+ * ZIP bytes are returned to the browser as base64 so the browser can download
+ * the archive onto the user's actual device. No GitHub upload is performed.
  */
 
 const CONFIG = {
   PAGE_SIZE: 100,
-  OUTPUT_PREFIX: 'classroom-discovery-',
+  MAX_ZIP_SOURCE_BYTES: 32 * 1024 * 1024,
   INCLUDE_COURSEWORK: true,
   INCLUDE_CLASS_MATERIALS: true,
   INCLUDE_ANNOUNCEMENTS: true
 };
 
-/** Serve the web app dashboard. */
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('index')
-    .setTitle('The Crypt — Classroom Discovery')
+    .setTitle('The Crypt — Classroom Exporter')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
-/**
- * Main entry point. Can be run from the editor or called by index.html using
- * google.script.run. Returns a serialisable result for the dashboard.
- */
-function discoverClassroomResources() {
+/** Load all courses for the class picker. Called when the page opens. */
+function getClassroomCourses() {
   assertClassroomService_();
-
-  const manifest = {
-    schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
-    account: safeEffectiveUser_(),
-    scope: 'Visible Classroom Drive attachments only; no student submissions',
-    courses: [],
-    resources: [],
-    warnings: [],
-    stats: {}
-  };
-
-  const courses = listAllCourses_();
-  manifest.courses = courses.map(function(course) {
+  return listAllCourses_().map(function(course) {
     return {
       id: String(course.id),
-      name: course.name || '(untitled course)',
+      name: course.name || '(untitled class)',
       section: course.section || '',
       courseState: course.courseState || '',
       alternateLink: course.alternateLink || ''
     };
+  }).sort(function(a, b) {
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Export one class's downloadable Drive attachments to a ZIP.
+ * The returned base64 is converted into a Blob by index.html and downloaded
+ * by the browser. External links and unsupported Google file types are listed
+ * in EXPORT-REPORT.txt instead of being falsely treated as downloaded files.
+ */
+function exportClassResources(courseId) {
+  assertClassroomService_();
+  if (!courseId) throw new Error('Select a class first.');
+
+  const courses = listAllCourses_();
+  const course = courses.filter(function(c) { return String(c.id) === String(courseId); })[0];
+  if (!course) throw new Error('That class was not found in the account running this app.');
+
+  const courseInfo = {
+    id: String(course.id),
+    name: course.name || '(untitled class)'
+  };
+  const resources = [];
+  const warnings = [];
+
+  function collect(stage, getter) {
+    try {
+      getter(course.id).forEach(function(item) {
+        addMaterialResources_(
+          { resources: resources },
+          courseInfo,
+          stage,
+          item,
+          item.materials || []
+        );
+      });
+    } catch (error) {
+      warnings.push(stage + ' scan failed: ' + errorMessage_(error));
+    }
+  }
+
+  if (CONFIG.INCLUDE_COURSEWORK) collect('assignment', listCoursework_);
+  if (CONFIG.INCLUDE_CLASS_MATERIALS) collect('class material', listCourseMaterials_);
+  if (CONFIG.INCLUDE_ANNOUNCEMENTS) collect('announcement', listAnnouncements_);
+
+  const unique = deduplicateResources_(resources).filter(function(r) {
+    return r.kind === 'drive_file' && r.driveFileId;
   });
 
-  courses.forEach(function(course) {
-    const courseInfo = {
-      id: String(course.id),
-      name: course.name || '(untitled course)'
-    };
+  const blobs = [];
+  const report = [
+    'The Crypt — Classroom export report',
+    'Class: ' + courseInfo.name,
+    'Generated: ' + new Date().toISOString(),
+    '',
+    'Only downloadable Drive attachments are included in this ZIP.',
+    'Links, YouTube videos, Forms, unsupported Google file types and files that',
+    'could not be accessed are reported below.',
+    ''
+  ];
+  let sourceBytes = 0;
+  let exportedCount = 0;
+  let skippedCount = 0;
 
-    if (CONFIG.INCLUDE_COURSEWORK) {
-      try {
-        listCoursework_(course.id).forEach(function(item) {
-          addMaterialResources_(manifest, courseInfo, 'coursework', item, item.materials || []);
-        });
-      } catch (error) {
-        manifest.warnings.push(warning_('coursework', courseInfo, error));
+  unique.forEach(function(resource) {
+    try {
+      const file = DriveApp.getFileById(resource.driveFileId);
+      const mimeType = file.getMimeType();
+      const converted = getExportBlob_(file, mimeType);
+      if (!converted) {
+        skippedCount++;
+        report.push('SKIPPED (unsupported type): ' + file.getName() + ' [' + mimeType + ']');
+        return;
       }
-    }
 
-    if (CONFIG.INCLUDE_CLASS_MATERIALS) {
-      try {
-        listCourseMaterials_(course.id).forEach(function(item) {
-          addMaterialResources_(manifest, courseInfo, 'class_material', item, item.materials || []);
-        });
-      } catch (error) {
-        manifest.warnings.push(warning_('class_material', courseInfo, error));
+      const bytes = converted.blob.getBytes().length;
+      if (sourceBytes + bytes > CONFIG.MAX_ZIP_SOURCE_BYTES) {
+        skippedCount++;
+        report.push('SKIPPED (ZIP size safety limit): ' + file.getName() +
+          ' (' + formatBytes_(bytes) + ')');
+        return;
       }
-    }
 
-    if (CONFIG.INCLUDE_ANNOUNCEMENTS) {
-      try {
-        listAnnouncements_(course.id).forEach(function(item) {
-          addMaterialResources_(manifest, courseInfo, 'announcement', item, item.materials || []);
-        });
-      } catch (error) {
-        manifest.warnings.push(warning_('announcement', courseInfo, error));
-      }
+      const stagePrefix = resource.source && resource.source.type
+        ? resource.source.type.replace(/[^a-z0-9_-]/gi, '_') + ' - '
+        : '';
+      const baseName = safeFilename_(stagePrefix + (converted.baseName || file.getName()));
+      const uniqueName = makeUniqueName_(baseName, blobs);
+      converted.blob.setName(uniqueName);
+      blobs.push(converted.blob);
+      sourceBytes += bytes;
+      exportedCount++;
+      report.push('EXPORTED: ' + uniqueName + ' (' + formatBytes_(bytes) + ')');
+    } catch (error) {
+      skippedCount++;
+      report.push('SKIPPED (could not access/export): ' + (resource.title || resource.driveFileId) +
+        ' — ' + errorMessage_(error));
     }
   });
 
-  manifest.resources = deduplicateResources_(manifest.resources);
-  manifest.stats = buildStats_(manifest);
+  resources.forEach(function(resource) {
+    if (resource.kind !== 'drive_file') {
+      report.push('REFERENCE ONLY: ' + (resource.title || resource.kind) +
+        (resource.url ? ' — ' + resource.url : ''));
+    }
+  });
 
-  const filename = CONFIG.OUTPUT_PREFIX +
-    Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss') +
-    '.json';
-  const file = DriveApp.createFile(filename, JSON.stringify(manifest, null, 2), MimeType.PLAIN_TEXT);
+  if (warnings.length) {
+    report.push('', 'SCAN WARNINGS:', warnings.join('\n'));
+  }
 
-  Logger.log('Discovery finished. Manifest: ' + file.getUrl());
+  report.push(
+    '',
+    'Summary:',
+    'Exported files: ' + exportedCount,
+    'Skipped files: ' + skippedCount,
+    'Source bytes included: ' + formatBytes_(sourceBytes),
+    'Scan warnings: ' + warnings.length
+  );
+
+  const reportBlob = Utilities.newBlob(report.join('\n'), 'text/plain', 'EXPORT-REPORT.txt');
+  blobs.push(reportBlob);
+
+  const zipName = safeFilename_(courseInfo.name) + '-resources.zip';
+  const zipBlob = Utilities.zip(blobs, zipName);
+  const zipBytes = zipBlob.getBytes();
+
+  // Base64 adds roughly one third to the payload. Keep the ZIP below a
+  // conservative limit so google.script.run can return it reliably.
+  if (zipBytes.length > 35 * 1024 * 1024) {
+    throw new Error('The ZIP is too large to send safely to your browser. Try exporting a smaller class or split the export into smaller groups.');
+  }
+
   return {
     success: true,
-    manifestUrl: file.getUrl(),
-    generatedAt: manifest.generatedAt,
-    stats: manifest.stats,
-    warnings: manifest.warnings
+    filename: zipName,
+    mimeType: 'application/zip',
+    base64: Utilities.base64Encode(zipBytes),
+    exportedCount: exportedCount,
+    skippedCount: skippedCount,
+    referenceCount: resources.filter(function(r) { return r.kind !== 'drive_file'; }).length,
+    warningCount: warnings.length,
+    zipBytes: zipBytes.length
   };
+}
+
+/** Convert native Google documents to common local formats; download other files as-is. */
+function getExportBlob_(file, mimeType) {
+  const googleExports = {
+    'application/vnd.google-apps.document': {
+      mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ext: '.docx'
+    },
+    'application/vnd.google-apps.spreadsheet': {
+      mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      ext: '.xlsx'
+    },
+    'application/vnd.google-apps.presentation': {
+      mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      ext: '.pptx'
+    },
+    'application/vnd.google-apps.drawing': {
+      mime: 'application/pdf',
+      ext: '.pdf'
+    }
+  };
+
+  if (googleExports[mimeType]) {
+    const target = googleExports[mimeType];
+    const url = 'https://www.googleapis.com/drive/v3/files/' +
+      encodeURIComponent(file.getId()) + '/export?mimeType=' + encodeURIComponent(target.mime);
+    const response = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+    const code = response.getResponseCode();
+    if (code < 200 || code >= 300) {
+      throw new Error('Google Drive export returned HTTP ' + code +
+        '. The file may be too large or export may be restricted.');
+    }
+    const name = stripExtension_(file.getName()) + target.ext;
+    return { blob: response.getBlob().setName(name), baseName: name };
+  }
+
+  // These Drive-native types do not have a useful direct download/export in
+  // this workflow. Do not silently substitute a misleading file format.
+  if (mimeType && mimeType.indexOf('application/vnd.google-apps.') === 0) {
+    return null;
+  }
+
+  const blob = file.getBlob();
+  blob.setName(file.getName() || 'download');
+  return { blob: blob, baseName: file.getName() || 'download' };
 }
 
 function assertClassroomService_() {
   if (typeof Classroom === 'undefined' || !Classroom.Courses || !Classroom.Courses.list) {
-    throw new Error(
-      'Google Classroom API service is missing. In Apps Script, open Services (+) ' +
-      'and add "Google Classroom API", then run this function again.'
-    );
+    throw new Error('Google Classroom API service is missing. In Apps Script, open Services (+) and add "Google Classroom API".');
   }
 }
 
@@ -238,38 +354,36 @@ function deduplicateResources_(resources) {
   return output;
 }
 
-function buildStats_(manifest) {
-  const stats = {
-    courseCount: manifest.courses.length,
-    resourceCount: manifest.resources.length,
-    driveAttachmentCount: 0,
-    externalLinkCount: 0,
-    youtubeCount: 0,
-    formCount: 0,
-    unknownAttachmentCount: 0,
-    warningCount: manifest.warnings.length
-  };
-  manifest.resources.forEach(function(resource) {
-    if (resource.kind === 'drive_file') stats.driveAttachmentCount++;
-    else if (resource.kind === 'external_link') stats.externalLinkCount++;
-    else if (resource.kind === 'youtube_video') stats.youtubeCount++;
-    else if (resource.kind === 'google_form') stats.formCount++;
-    else stats.unknownAttachmentCount++;
-  });
-  return stats;
+function safeFilename_(name) {
+  return String(name || 'classroom-export')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+|\.+$/g, '')
+    .substring(0, 120) || 'classroom-export';
 }
 
-function warning_(stage, course, error) {
-  return {
-    stage: stage, courseId: course.id, courseName: course.name,
-    message: String(error && error.message ? error.message : error)
-  };
+function stripExtension_(name) {
+  return String(name || 'export').replace(/\.[^/.]+$/, '');
 }
 
-function safeEffectiveUser_() {
-  try {
-    return Session.getEffectiveUser().getEmail() || '';
-  } catch (error) {
-    return '';
-  }
+function makeUniqueName_(name, blobs) {
+  const existing = {};
+  blobs.forEach(function(blob) { existing[blob.getName()] = true; });
+  if (!existing[name]) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.substring(0, dot) : name;
+  const ext = dot > 0 ? name.substring(dot) : '';
+  let n = 2;
+  while (existing[stem + ' (' + n + ')' + ext]) n++;
+  return stem + ' (' + n + ')' + ext;
+}
+
+function formatBytes_(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function errorMessage_(error) {
+  return String(error && error.message ? error.message : error);
 }
